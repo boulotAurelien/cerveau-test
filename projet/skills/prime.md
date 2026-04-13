@@ -1,72 +1,175 @@
 # Prime — Chargement de contexte
 
-Charge le contexte du second cerveau Joplin au debut de chaque session Claude.
+Charge le contexte complet du second cerveau Joplin au debut de chaque session Claude.
+A executer en premier, avant toute autre action.
 
 ## Prerequis
 
-Lire `projet/joplin-config.json` pour obtenir `api_url` et `token`.
-Toutes les requetes suivantes utilisent ces valeurs.
+Lire `projet/joplin-config.json` pour obtenir `api_url`, `token` et `notebook_root`.
+Lire `projet/CLAUDE.md` pour charger les regles absolues, la structure et les conventions.
 
 ## Etapes
 
-### 1. Lire CLAUDE.md
+Les etapes 2 a 5 peuvent etre executees en parallele (requetes API independantes).
 
-Lire le fichier `projet/CLAUDE.md` pour charger les regles absolues et la structure du systeme.
+### 1. Charger la configuration et les regles
 
-### 2. Trouver et lire la note index
+- Lire `projet/joplin-config.json` → memoriser `api_url`, `token`, `notebook_root`
+- Lire `projet/CLAUDE.md` → memoriser les regles absolues, la structure wiki/, les tags systeme
 
-Recuperer la liste de tous les tags :
+### 2. Recuperer tous les tags systeme
 
 ```
 GET {api_url}/tags?token={token}
 ```
 
-Identifier le tag dont le titre est `index`. Recuperer son `id`.
+Identifier et memoriser les IDs des tags suivants (utilises dans toutes les etapes suivantes) :
 
-Lister les notes associees a ce tag :
+| Tag | Role |
+|---|---|
+| `index` | Note index du wiki |
+| `log` | Journal chronologique |
+| `daily` | Notes de session |
+| `wiki` | Notes wiki compilees |
+| `raw` | Notes sources brutes |
+| `ingested` | Notes raw deja traitees |
+
+Si un tag est absent : noter son absence, ne pas bloquer.
+
+### 3. Lire la note index
+
+Lister les notes du tag `index` :
 
 ```
-GET {api_url}/tags/{tag_id}/notes?token={token}&fields=id,title,body,updated_time
+GET {api_url}/tags/{index_tag_id}/notes?token={token}&fields=id,title,body,updated_time
 ```
 
-Lire le corps de la note index. C'est le panneau de direction du wiki — ne pas scanner d'autres notes.
+Lire le corps de la note index. Extraire :
+- Le nombre d'entrees par section (Context, Intelligence, Resources)
+- La date de derniere mise a jour (frontmatter `date:`)
+- Les titres des notes listees (pour connaitre le perimetre du wiki)
 
-Si le tag `index` n'existe pas ou qu'aucune note n'y est associee : signaler a l'utilisateur que le wiki n'est pas encore initialise et lui proposer de lancer `/ingest` pour commencer.
+Si le tag `index` n'existe pas ou qu'aucune note n'y est associee :
+→ Stopper et afficher : "Wiki non initialise. Lancer /ingest pour commencer."
 
-### 3. Trouver et lire la derniere daily note
+### 4. Lire les notes wiki/Context/
 
-Identifier le tag `daily`. Lister les notes associees :
+Lister les notes avec le tag `wiki` dont le type est `contexte` :
 
 ```
-GET {api_url}/tags/{tag_id}/notes?token={token}&fields=id,title,body,updated_time&order_by=updated_time&order_dir=DESC&limit=1
+GET {api_url}/search?token={token}&query=type:contexte&fields=id,title,body,updated_time
 ```
 
-Lire le corps de la note daily la plus recente.
+Si la recherche ne retourne rien, lister directement le notebook Context/ :
 
-Si aucune daily n'existe : signaler a l'utilisateur qu'aucune session precedente n'a ete trouvee.
+```
+GET {api_url}/folders?token={token}
+```
+
+Identifier le notebook `Context` sous `wiki/`. Lister ses notes :
+
+```
+GET {api_url}/folders/{context_notebook_id}/notes?token={token}&fields=id,title,body,updated_time&limit=20
+```
+
+Lire le corps de chaque note Context. Ce sont les notes les plus importantes : profil, projets
+en cours, objectifs, stack technique. Les garder en memoire de travail pendant toute la session.
+
+Si le notebook `Context/` est vide ou absent :
+→ Signaler : "Aucun contexte personnel trouve dans wiki/Context/. Recommande : creer des notes
+de profil (stack, projets, objectifs) pour enrichir le contexte de chaque session."
+
+### 5. Lire la derniere daily note
+
+Lister les notes du tag `daily`, triees par date descendante, limit 1 :
+
+```
+GET {api_url}/tags/{daily_tag_id}/notes?token={token}&fields=id,title,body,updated_time&order_by=updated_time&order_dir=DESC&limit=1
+```
+
+Lire le corps de la note daily la plus recente. Extraire :
+- Date de la session precedente
+- Actions realisees
+- Decisions prises
+- Prochaines etapes mentionnees
+
+Si aucune daily n'existe : noter "Premiere session — pas d'historique".
+
+### 6. Detecter le backlog raw non ingeste
+
+Compter les notes non traitees dans raw/ :
+
+```
+GET {api_url}/tags/{raw_tag_id}/notes?token={token}&fields=id,title&limit=100
+GET {api_url}/tags/{ingested_tag_id}/notes?token={token}&fields=id&limit=100
+```
+
+Calculer : `backlog = notes_raw - notes_ingested`.
+
+Si backlog > 0 : signaler le nombre de notes en attente d'ingest.
+
+### 7. Lire les 3 dernieres entrees du log
+
+Lister les notes du tag `log` :
+
+```
+GET {api_url}/tags/{log_tag_id}/notes?token={token}&fields=id,body&limit=1
+```
+
+Extraire les 5 dernieres lignes du corps (les entrees les plus recentes).
 
 ## Output attendu
 
-Confirmer ce qui a ete charge en resumant :
-
-- Nombre de categories dans l'index (compter les sections ou entrees de la note index)
-- Date de la derniere daily note
-- Points cles de la derniere session (actions, decisions, prochaines etapes extraits de la daily)
-
-Exemple de sortie :
+Afficher un bloc de contexte structure, concis, actionnable :
 
 ```
-## Contexte charge
+## Contexte charge — YYYY-MM-DD
 
-- CLAUDE.md : lu
-- Index wiki : 3 categories, derniere mise a jour YYYY-MM-DD
-- Derniere session : YYYY-MM-DD
-  - Actions : ...
-  - Prochaine etape : ...
+### Wiki
+- Index : X notes (Context: A | Intelligence: B | Resources: C) — mis a jour le YYYY-MM-DD
+- Backlog raw : N notes en attente d'ingest [ou "aucun backlog"]
+
+### Contexte personnel (wiki/Context/)
+[Resumer en 3-5 points ce que les notes Context revelent : stack, projets actifs, objectifs]
+[Si absent : "(aucun contexte personnel — recommande de creer wiki/Context/)"]
+
+### Derniere session (YYYY-MM-DD)
+- Actions realisees : ...
+- Decisions : ...
+- Prochaine etape : ...
+[Si aucune daily : "(premiere session)"]
+
+### Activite recente (log)
+- YYYY-MM-DD HH:MM — [derniere entree log]
+- YYYY-MM-DD HH:MM — [avant-derniere entree log]
+
+### Alertes
+[Lister uniquement si pertinent :]
+- N notes raw en attente d'ingest → lancer /ingest
+- wiki/Context/ vide → creer des notes de profil
+- Index vide → wiki non initialise
 ```
+
+## Memoire de travail
+
+Apres /prime, Claude doit avoir en memoire active pour toute la session :
+
+- Les IDs des tags systeme (index, log, daily, wiki, raw, ingested)
+- L'ID de la note index et du notebook wiki/
+- Le contenu des notes wiki/Context/ (profil, projets, stack)
+- La date et les prochaines etapes de la derniere daily note
+- Le nombre de notes en backlog raw
+
+Ces informations doivent etre utilisees automatiquement dans les autres skills (/ingest, /save,
+/query) sans re-interroger l'API si les donnees sont deja chargees.
 
 ## Regles
 
-- Ne JAMAIS ecrire dans Joplin pendant /prime — c'est une operation de lecture uniquement
-- Ne JAMAIS scanner toutes les notes du wiki — utiliser uniquement la note index comme point d'entree
-- Si l'index n'existe pas ou est vide, le signaler clairement a l'utilisateur
+- Ne JAMAIS ecrire dans Joplin pendant /prime — lecture uniquement
+- Ne JAMAIS scanner toutes les notes du wiki — utiliser l'index comme point d'entree, Context/ pour
+  le profil, et rien d'autre sauf si une etape le requiert explicitement
+- Ne JAMAIS bloquer sur une ressource absente — signaler et continuer avec ce qui est disponible
+- Executer les etapes 2 a 5 en parallele pour minimiser le temps de chargement
+- Si /prime echoue completement (API inaccessible) : afficher
+  "Joplin inaccessible. Verifier que Joplin Desktop est ouvert et que le Web Clipper est actif
+  (port 41184). Config : projet/joplin-config.json"
